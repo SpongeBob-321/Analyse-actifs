@@ -1,260 +1,172 @@
 import os
 import sqlite3
+
 import pandas as pd
-import plotly.express as px
 import streamlit as st
+from asset_geography import european_status
+from fundamentals import render_fundamentals
 
-# Nom de la base de données SQLite incluse dans votre dépôt GitHub[cite: 1, 2]
-DB_NAME = "market_data.db"
+from pathlib import Path
 
-st.set_page_config(
-    page_title="Screener Financier Pro (Fondamental & Technique)",
-    page_icon="📈",
-    layout="wide",
-)
+DB_NAME = os.path.join(os.path.dirname(os.path.abspath(__file__)), "market_data.db")
 
-st.title("📈 Screener Global : Fondamentaux & Technique")
 
-# --- MESSAGE D'AVERTISSEMENT ---
-st.markdown(
-    """
-    <div style="
-        background-color: #4b4e36; 
-        border: 1px solid #6b704c; 
-        padding: 16px; 
-        border-radius: 8px; 
-        margin-bottom: 20px;
-        color: #f1f5f9;
-        font-size: 15px;
-    ">
-        ⚠️ <b>Avertissement :</b> Ce screener ne constitue en aucun cas un conseil en investissement. !!! NOT FINANCIAL ADVICE !!!
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "screener-financier-pro-logo.png")
 
-# --- FILTRES DE SÉLECTION ---
+st.set_page_config(page_title="Screener Financier Pro (Fondamental & Technique)", page_icon=LOGO_PATH, layout="wide")
+st.logo(LOGO_PATH, size="large")
+with st.container(horizontal=True, vertical_alignment="center"):
+    st.image(LOGO_PATH, width=80)
+    st.title("Screener Global : Fondamentaux & Technique")
+
+st.warning("⚠️ **Avertissement :** Ce screener ne constitue en aucun cas un conseil en investissement. !!! NOT FINANCIAL ADVICE !!!")
+
+
+@st.cache_data(max_entries=1)
+def load_stocks(database_mtime_ns):
+    del database_mtime_ns
+    with sqlite3.connect(Path(DB_NAME).as_uri() + "?mode=ro", uri=True) as conn:
+        try:
+            return pd.read_sql("SELECT * FROM stocks", conn)
+        except Exception:
+            return pd.DataFrame()
+
+
 st.sidebar.header("🔎 Filtres de Sélection")
-
 search_query = st.sidebar.text_input("Rechercher un actif (Ticker ou Nom)", "").strip().upper()
-
 min_upside = st.sidebar.slider("Potentiel de hausse min (%)", -20.0, 100.0, 40.0)
 max_pe = st.sidebar.slider("P/E Ratio max", 0.0, 100.0, 30.0)
-
+min_market_cap = st.sidebar.number_input("Capitalisation minimale (Mds)", min_value=0.0, value=0.1, step=0.1)
 st.sidebar.markdown("---")
 st.sidebar.subheader("📉 Filtres Techniques")
 max_rsi = st.sidebar.slider("RSI Max (14 jours)", 0.0, 100.0, 50.0)
-
+sma50_min, sma50_max = st.sidebar.slider(
+    "Écart à la SMA50 (%)", -100.0, 100.0, (-20.0, 20.0),
+    help="Écart entre le cours et sa moyenne sur 50 séances. Négatif : sous la SMA50 ; positif : au-dessus.",
+)
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧠 Sentiment & Révisions")
-max_sentiment = st.sidebar.slider(
-    "Score Sentiment Max (1.0 = Achat, 3.0 = Neutre)", 1.0, 5.0, 2.5
+recommendation_labels = {
+    "strong_buy": "Strong buy", "buy": "Buy", "hold": "Hold",
+    "sell": "Sell", "strong_sell": "Strong sell",
+}
+selected_recommendations = st.sidebar.multiselect(
+    "Recommandations des analystes", list(recommendation_labels),
+    default=["strong_buy", "buy"], format_func=recommendation_labels.get,
+    help="Sélectionnez un ou plusieurs avis. Sélection vide : tous les avis, y compris ceux non disponibles.",
 )
-min_eps_growth = st.sidebar.slider(
-    "Croissance EPS Prévue Min (%)", -50.0, 100.0, -0.5
-)
+min_eps_growth = st.sidebar.slider("Croissance EPS Prévue Min (%)", -50.0, 100.0, -0.5)
 
-# --- CHARGEMENT ---
 if not os.path.exists(DB_NAME):
-  st.warning(f"⚠️ Base de données `{DB_NAME}` introuvable. Veuillez uploader le fichier de données à jour sur votre dépôt GitHub[cite: 1, 2].")
-else:
-  conn = sqlite3.connect(DB_NAME)
-  try:
-    df = pd.read_sql("SELECT * FROM stocks", conn)
-  except Exception:
-    df = pd.DataFrame()
-  conn.close()
+    st.warning("⚠️ Fichier market_data.db absent. Il doit être ajouté au dossier de la version en ligne.")
+    st.stop()
 
-  # --- VÉRIFICATION SI LE DATAFRAME EST VIDE ---
-  if df.empty:
-    st.warning("⚠️ La base de données existe mais la table 'stocks' est vide.")
-  else:
-    if "last_updated" in df.columns and not df["last_updated"].isna().all():
-      st.caption(f"🕒 Données synchronisées le : **{df['last_updated'].iloc[0]}**")
+df = load_stocks(os.stat(DB_NAME).st_mtime_ns)
+if df.empty:
+    st.warning("⚠️ Table 'stocks' vide ou illisible. Veuillez fournir un fichier market_data.db valide.")
+    st.stop()
 
-    # --- SÉCURITÉ COLONNES ---
-    if "sentiment_score" not in df.columns:
-      df["sentiment_score"] = 3.0
-    if "eps_growth_forecast" not in df.columns:
-      df["eps_growth_forecast"] = 0.0
+if "last_updated" in df.columns:
+    st.caption(f"🕒 Données synchronisées : **{df['last_updated'].iloc[0]}**")
+if "market_cap_billion" not in df.columns:
+    df["market_cap_billion"] = 0.0
+    st.sidebar.warning("La capitalisation n’est pas renseignée dans le fichier de données fourni.")
 
-    # --- APPLICATION DES FILTRES ---
-    filtered_df = df.copy()
+scored_universe = df.copy()
+scored_universe["Europe"] = [
+    european_status(row.get("country"), row.get("ticker", ""))
+    for row in scored_universe.to_dict("records")
+]
+europe_filter = st.sidebar.multiselect(
+    "Zone géographique", sorted(scored_universe["Europe"].unique()),
+    help="Sélection vide : toutes les zones. Le pays ne garantit pas l'éligibilité au PEA.",
+)
+for col in ("upside", "roe", "eps_growth_forecast", "rsi", "sma_50_dist"):
+    if col in scored_universe.columns:
+        scored_universe[col] = scored_universe[col].fillna(0)
+scored_universe["Score upside (30)"] = scored_universe["upside"].rank(pct=True) * 30
+scored_universe["Score ROE (25)"] = scored_universe["roe"].rank(pct=True) * 25
+scored_universe["Score EPS (25)"] = scored_universe["eps_growth_forecast"].rank(pct=True) * 25
 
-    if search_query:
-        filtered_df = filtered_df[
-            filtered_df["ticker"].str.contains(search_query, na=False)
-            | filtered_df["name"].str.upper().str.contains(search_query, na=False)
-        ]
+def score_rsi_func(val):
+    if 40 <= val <= 65:
+        return 1.0
+    if 30 <= val < 40 or 65 < val <= 75:
+        return 0.6
+    return 0.2
 
+scored_universe["Score RSI (10)"] = scored_universe["rsi"].apply(score_rsi_func) * 10
+scored_universe["Score SMA (10)"] = scored_universe["sma_50_dist"].apply(lambda value: 1.0 if 0 <= value <= 20 else 0.5 if value < 0 else 0.7) * 10
+score_columns = ["Score upside (30)", "Score ROE (25)", "Score EPS (25)", "Score RSI (10)", "Score SMA (10)"]
+scored_universe["Score Global"] = scored_universe[score_columns].sum(axis=1).round(1)
+
+filtered_df = scored_universe[
+    (scored_universe["upside"] >= min_upside)
+    & (scored_universe["pe_ratio"] <= max_pe)
+    & (scored_universe["market_cap_billion"] >= min_market_cap)
+    & (scored_universe["rsi"] <= max_rsi)
+    & (scored_universe["eps_growth_forecast"] >= min_eps_growth)
+].copy()
+if selected_recommendations:
+    filtered_df = filtered_df[filtered_df["recommendation"].isin(selected_recommendations)].copy()
+filtered_df = filtered_df[filtered_df["sma_50_dist"].between(sma50_min, sma50_max)].copy()
+if search_query:
     filtered_df = filtered_df[
-        (filtered_df["upside"] >= min_upside)
-        & (filtered_df["pe_ratio"] <= max_pe)
-        & (filtered_df["rsi"] <= max_rsi)
-        & (filtered_df["sentiment_score"] <= max_sentiment)
-        & (filtered_df["eps_growth_forecast"] >= min_eps_growth)
-    ].sort_values(by="upside", ascending=False)
+        filtered_df["ticker"].str.contains(search_query, case=False, na=False)
+        | filtered_df["name"].str.upper().str.contains(search_query, na=False)
+    ]
+filtered_df = filtered_df.sort_values("Score Global", ascending=False)
+if europe_filter:
+    filtered_df = filtered_df[filtered_df["Europe"].isin(europe_filter)]
 
-    # --- MÉTRIQUES ---
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Actifs Total", len(df))
-    col2.metric("Actifs Filtrés", len(filtered_df))
-    top_upside = (
-        f"{filtered_df['upside'].max():.1f}%" if not filtered_df.empty else "N/A"
-    )
-    col3.metric("Meilleur Potentiel", top_upside)
-    avg_rsi = (
-        f"{filtered_df['rsi'].mean():.1f}" if not filtered_df.empty else "N/A"
-    )
-    col4.metric("RSI Moyen (Filtré)", avg_rsi)
+screener_tab, fundamentals_tab = st.tabs(["Screener", "Fondamentaux"], on_change="rerun", key="main_tabs")
 
-    st.markdown("---")
+with screener_tab:
+    col1, col2 = st.columns(2)
+    col1.metric("Actifs totaux", len(df))
+    col2.metric("Actifs sélectionnés", len(filtered_df))
 
-    # --- ONGLETS ---
-    tab1, tab2, tab3 = st.tabs(
-        ["🎯 Top Opportunités", "📊 RSI vs Potentiel de Hausse", "📋 Matrice GARP"]
-    )
+    if filtered_df.empty:
+        st.info("Aucun actif ne correspond à vos filtres actuels.")
+    else:
+        df_scored = filtered_df.reset_index(drop=True).copy()
 
-    with tab1:
-      st.subheader("🎯 Classement Global (Fondamental + Technique optimisé)")
-      if not filtered_df.empty:
-          
-          # --- Calcul du Score Global Fondamental + Technique ---
-          df_scored = filtered_df.copy()
-          
-          # Nettoyage des valeurs manquantes pour le calcul
-          for col in ["upside", "roe", "eps_growth_forecast", "rsi", "sma_50_dist"]:
-              if col in df_scored.columns:
-                  df_scored[col] = df_scored[col].fillna(0)
-          
-          # Normalisation par percentiles (de 0 à 100 relative au dataset filtré)
-          score_upside = df_scored["upside"].rank(pct=True) * 30         # 30% du poids
-          score_roe = df_scored["roe"].rank(pct=True) * 25               # 25% du poids
-          score_eps = df_scored["eps_growth_forecast"].rank(pct=True) * 25 # 25% du poids
-          
-          # Score technique RSI (optimal entre 40 et 65)
-          def score_rsi_func(val):
-              if 40 <= val <= 65: return 1.0
-              elif 30 <= val < 40 or 65 < val <= 75: return 0.6
-              else: return 0.2
-          score_rsi = df_scored["rsi"].apply(score_rsi_func) * 10        # 10% du poids
-          
-          # Score technique SMA 50 (privilégie les cours au-dessus de la SMA 50)
-          score_sma = df_scored["sma_50_dist"].apply(lambda x: 1.0 if 0 <= x <= 20 else (0.5 if x < 0 else 0.7)) * 10 # 10% du poids
-          
-          # Ajout de la colonne de score global sur 100
-          df_scored["Score Global"] = (score_upside + score_roe + score_eps + score_rsi + score_sma).round(1)
-          
-          # Tri automatique par ordre décroissant du Score Global
-          df_scored = df_scored.sort_values(by="Score Global", ascending=False).reset_index(drop=True)
+        def color_recommendation(val):
+            if val in ("strong_buy", "buy"):
+                return "color: #2ecc71; font-weight: bold;"
+            if val in ("strong_sell", "sell"):
+                return "color: #e74c3c; font-weight: bold;"
+            return "color: #f1c40f; font-weight: bold;"
 
-          # Fonction pour colorer les recommandations
-          def color_recommendation(val):
-              if val in ["strong_buy", "buy"]:
-                  return "color: #2ecc71; font-weight: bold;"
-              elif val in ["strong_sell", "sell"]:
-                  return "color: #e74c3c; font-weight: bold;"
-              return "color: #f1c40f; font-weight: bold;"
+        def color_sma_50(val):
+            if 0 <= val <= 20:
+                return "color: #2ecc71; font-weight: bold;"
+            if val > 20:
+                return "color: #f39c12; font-weight: bold;"
+            return "color: #e74c3c; font-weight: bold;"
 
-          # Affichage avec mise en forme et dégradés
-          styled_df = (
-              df_scored
-              .style
-              .background_gradient(subset=["Score Global"], cmap="YlOrRd")    # 🔥 Teinte chaude pour le top score global
-              .background_gradient(subset=["upside"], cmap="Greens")          # 🟢 Potentiel
-              .background_gradient(subset=["roe"], cmap="Blues")              # 🔵 Rentabilité
-              .background_gradient(subset=["eps_growth_forecast"], cmap="Purples") # 🟣 Croissance EPS
-              .map(color_recommendation, subset=["recommendation"])
-              .format({
-                  "Score Global": "{:.1f} / 100",
-                  "price": "{:.2f} $",
-                  "target_price": "{:.2f} $",
-                  "upside": "{:+.2f}%",
-                  "analysts": "{:.0f}",
-                  "pe_ratio": "{:.2f}",
-                  "roe": "{:.2f}%",
-                  "rsi": "{:.1f}",
-                  "sma_50_dist": "{:+.2f}%",
-                  "sentiment_score": "{:.2f}",
-                  "eps_growth_forecast": "{:+.2f}%",
-              })
-          )
-          
-          st.dataframe(styled_df, use_container_width=True, height=500)
-      else:
-          st.info("Aucun actif ne correspond à vos filtres actuels.")
+        def color_rsi(val):
+            if 40 <= val <= 65:
+                return "color: #2ecc71; font-weight: bold;"
+            if 30 <= val < 40 or 65 < val <= 75:
+                return "color: #f39c12; font-weight: bold;"
+            return "color: #e74c3c; font-weight: bold;"
 
-    with tab2:
-      st.subheader("📊 Croisement RSI vs Potentiel de Hausse")
-      if not filtered_df.empty:
-        plot_df = filtered_df.copy()
-        plot_df["bubble_size"] = plot_df["roe"].clip(lower=1).fillna(1)
-
-        fig = px.scatter(
-            plot_df,
-            x="rsi",
-            y="upside",
-            size="bubble_size",
-            color="recommendation",
-            hover_name="name",
-            hover_data=[
-                "ticker",
-                "price",
-                "pe_ratio",
-                "rsi",
-                "sma_50_dist",
-                "analysts",
-                "eps_growth_forecast",
-            ],
-            title="Indicateur Technique (RSI) vs Potentiel Fondamental (Upside)",
-            labels={
-                "rsi": "RSI (14 jours)",
-                "upside": "Potentiel de Hausse (%)",
-                "recommendation": "Avis Analystes",
-            },
-            template="plotly_dark",
+        display_df = df_scored.drop(
+            columns=["sentiment_score", *score_columns[:-1]], errors="ignore"
+        ).reset_index(drop=True)
+        display_df.insert(1, "Europe", display_df.pop("Europe"))
+        display_df = display_df.drop(columns=["last_updated", "country", "Score SMA (10)"], errors="ignore")
+        styled_df = display_df.style.background_gradient(subset=["Score Global"], cmap="Greens").background_gradient(subset=["upside"], cmap="RdYlGn").background_gradient(subset=["roe"], cmap="Blues").background_gradient(subset=["eps_growth_forecast"], cmap="Purples").map(color_recommendation, subset=["recommendation"]).map(color_sma_50, subset=["sma_50_dist"]).map(color_rsi, subset=["rsi"]).format({"Score Global": "{:.1f} / 100", "price": "{:.2f} $", "target_price": "{:.2f} $", "upside": "{:+.2f}%", "analysts": "{:.0f}", "market_cap_billion": "{:.2f} Md", "pe_ratio": "{:.2f}", "roe": "{:.2f}%", "eps_growth_forecast": "{:+.2f}%", "rsi": "{:.1f}", "sma_50_dist": "{:+.2f}%"})
+        selection = st.dataframe(
+            styled_df, width="stretch", height=500,
+            on_select="rerun", selection_mode="single-row", key="asset_table",
         )
-        fig.add_vline(
-            x=30, line_dash="dash", line_color="green", annotation_text="Survente"
-        )
-        fig.add_vline(
-            x=70, line_dash="dash", line_color="red", annotation_text="Surachat"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-      else:
-        st.warning("Pas assez de données pour afficher le graphique.")
+        if screener_tab.open and selection.selection.rows:
+            st.session_state["fundamental_asset"] = display_df.iloc[selection.selection.rows[0]]["ticker"]
+        st.caption("Sélectionnez une ligne, puis ouvrez l’onglet Fondamentaux pour consulter la fiche de l’actif.")
 
-    with tab3: 
-        st.subheader("🎯 Matrice GARP (Croissance vs Valorisation)")
-        if not filtered_df.empty:
-            viz_df = filtered_df[filtered_df["pe_ratio"] < 100].copy() 
-            viz_df["bubble_size"] = viz_df["upside"].clip(lower=1).fillna(1)
 
-            fig = px.scatter(
-                viz_df,
-                x="eps_growth_forecast",
-                y="pe_ratio",
-                color="recommendation",
-                size="bubble_size",
-                hover_name="ticker",
-                hover_data=["name", "price", "eps_growth_forecast", "pe_ratio", "upside"],
-                title="Analyse GARP : Croissance EPS vs P/E Ratio",
-                labels={
-                    "eps_growth_forecast": "Croissance EPS Prévue (%)",
-                    "pe_ratio": "P/E Ratio",
-                },
-                template="plotly_dark",
-            )
-            
-            fig.add_hline(y=25, line_dash="dot", line_color="red", annotation_text="P/E Limite (25)")
-            fig.add_vline(x=15, line_dash="dot", line_color="green", annotation_text="Croissance Cible (15%)")
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.info("💡 **Comment lire ce graphique :** \n\n"
-                    "• **Cadran Bas-Droite (Zone Verte) :** Le 'Sweet Spot'. Croissance élevée pour un prix raisonnable.\n"
-                    "• **Cadran Haut-Droite :** Croissance élevée mais très cher (risque de surévaluation).\n"
-                    "• **Cadran Bas-Gauche :** Valeurs 'Value' à faible croissance.\n"
-                    "• **Cadran Haut-Gauche :** À éviter (croissance faible et cher).")
-        else:
-            st.warning("Pas assez de données pour afficher la matrice GARP.")
+with fundamentals_tab:
+    if fundamentals_tab.open:
+        render_fundamentals(df)
