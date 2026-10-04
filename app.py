@@ -27,7 +27,7 @@ st.markdown(
         color: #f1f5f9;
         font-size: 15px;
     ">
-        ⚠️ <b>Avertissement :</b> Ce modèle est fourni exclusivement à des fins de recherche et d'analyse statistique. Il ne constitue en aucun cas un conseil en investissement. !!! NOT FINANCIAL ADVICE !!!
+        ⚠️ <b>Avertissement :</b> Ce screener ne constitue en aucun cas un conseil en investissement. !!! NOT FINANCIAL ADVICE !!!
     </div>
     """,
     unsafe_allow_html=True,
