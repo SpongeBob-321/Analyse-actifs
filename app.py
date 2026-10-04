@@ -156,7 +156,7 @@ with screener_tab:
             columns=["sentiment_score", *score_columns[:-1]], errors="ignore"
         ).reset_index(drop=True)
         display_df.insert(1, "Europe", display_df.pop("Europe"))
-        display_df = display_df.drop(columns=["last_updated", "country", "Score SMA (10)"], errors="ignore")
+        display_df = display_df.drop(columns=["last_updated", "country", "Score SMA (10)", "Europe"], errors="ignore")
         styled_df = display_df.style.background_gradient(subset=["Score Global"], cmap="Greens").background_gradient(subset=["upside"], cmap="RdYlGn").background_gradient(subset=["roe"], cmap="Blues").background_gradient(subset=["eps_growth_forecast"], cmap="Purples").map(color_recommendation, subset=["recommendation"]).map(color_sma_50, subset=["sma_50_dist"]).map(color_rsi, subset=["rsi"]).format({"Score Global": "{:.1f} / 100", "price": "{:.2f} $", "target_price": "{:.2f} $", "upside": "{:+.2f}%", "analysts": "{:.0f}", "market_cap_billion": "{:.2f} Md", "pe_ratio": "{:.2f}", "roe": "{:.2f}%", "eps_growth_forecast": "{:+.2f}%", "rsi": "{:.1f}", "sma_50_dist": "{:+.2f}%"})
         selection = st.dataframe(
             styled_df, width="stretch", height=500,
@@ -169,4 +169,4 @@ with screener_tab:
 
 with fundamentals_tab:
     if fundamentals_tab.open:
-        render_fundamentals(df)
+        render_fundame
