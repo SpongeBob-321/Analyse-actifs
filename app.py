@@ -169,4 +169,4 @@ with screener_tab:
 
 with fundamentals_tab:
     if fundamentals_tab.open:
-        render_fundame
+        render_fundamentals(df)
